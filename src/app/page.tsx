@@ -42,8 +42,11 @@ import {
   textToSpeech, 
   transcribeAudio,
   connectLive,
-  editImage
+  editImage,
+  createChat,
+  SYSTEM_PROMPT
 } from '../services/gemini';
+import { tools, executeTool } from "../services/tools";
 
 declare global {
   interface Window {
@@ -141,7 +144,7 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAppsOpen, setIsAppsOpen] = useState(false);
   const [isVoiceOpen, setIsVoiceOpen] = useState(false);
-  const [activeModal, setActiveModal] = useState<'account' | 'instructions' | 'data' | null>(null);
+  const [activeModal, setActiveModal] = useState<'account' | 'settings' | 'data' | null>(null);
   const [isThinking, setIsThinking] = useState(false);
   const [isFastMode, setIsFastMode] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -164,6 +167,26 @@ export default function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState('');
+  
+  const [userContext, setUserContext] = useState('');
+  const [responseStyle, setResponseStyle] = useState('');
+  const [theme, setTheme] = useState<'light' | 'dark' | 'system'>('system');
+
+  useEffect(() => {
+    const savedUserContext = localStorage.getItem('eburon_userContext');
+    const savedResponseStyle = localStorage.getItem('eburon_responseStyle');
+    const savedTheme = localStorage.getItem('eburon_theme') as 'light' | 'dark' | 'system' || 'system';
+    if (savedUserContext) setUserContext(savedUserContext);
+    if (savedResponseStyle) setResponseStyle(savedResponseStyle);
+    setTheme(savedTheme);
+  }, []);
+
+  const saveSettings = () => {
+    localStorage.setItem('eburon_userContext', userContext);
+    localStorage.setItem('eburon_responseStyle', responseStyle);
+    localStorage.setItem('eburon_theme', theme);
+    setActiveModal(null);
+  };
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -325,7 +348,9 @@ export default function App() {
         () => {
           console.log("Live session closed");
           stopLiveSession();
-        }
+        },
+        userContext,
+        responseStyle
       );
 
       liveSessionRef.current = await sessionPromise;
@@ -606,7 +631,7 @@ export default function App() {
         let groundingMetadata = null;
         
         try {
-          const stream = generateChatResponseStream(textToSend, history, isThinking, isFastMode);
+          const stream = generateChatResponseStream(textToSend, history, isThinking, isFastMode, userContext, responseStyle, tools);
           for await (const chunk of stream) {
             fullText += chunk.text || '';
             if (chunk.groundingMetadata) {
@@ -664,11 +689,29 @@ export default function App() {
           try {
             const transcription = await transcribeAudio(base64, 'audio/webm');
             if (transcription) {
+              const lowerTranscript = transcription.toLowerCase().trim();
+              
+              // Voice Commands
+              if (lowerTranscript.includes('create new chat') || lowerTranscript.includes('start new chat')) {
+                createNewChat();
+                return;
+              }
+              if (lowerTranscript.includes('clear history') || lowerTranscript.includes('delete history')) {
+                // Assuming we want to clear the current chat history
+                setMessages([]);
+                return;
+              }
+              if (lowerTranscript.includes('open settings') || lowerTranscript.includes('show settings')) {
+                setActiveModal('settings');
+                return;
+              }
+              
               setInput(transcription);
               if (textareaRef.current) {
                 textareaRef.current.style.height = 'auto';
                 textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
               }
+              sendMessage(transcription);
             }
           } catch (error) {
             console.error(error);
@@ -915,7 +958,10 @@ export default function App() {
                           <div className="flex-1 overflow-hidden">
                             {msg.image && (
                               <div className="relative group mb-4">
-                                <img src={msg.image} alt="Generated" className="rounded-xl w-full object-cover shadow-lg border border-white/10" referrerPolicy="no-referrer" />
+                                <img src={msg.image} alt="Generated" className="rounded-xl w-full object-cover shadow-lg border border-white/10 cursor-pointer" referrerPolicy="no-referrer" onClick={() => window.open(msg.image, '_blank')} />
+                                <div className="absolute top-2 right-2 p-1 bg-black/50 rounded-full opacity-0 group-hover:opacity-100 transition-opacity">
+                                  <img src={msg.image} alt="Preview" className="w-16 h-16 rounded-lg object-cover border border-white/20" />
+                                </div>
                                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center gap-2">
                                   {msg.isImageGen && (
                                     <>
@@ -1346,7 +1392,7 @@ export default function App() {
                     <User size={18} />
                     <span>Account</span>
                   </button>
-                  <button onClick={() => setActiveModal('instructions')} className="w-full flex items-center space-x-3 p-3 rounded-xl hover:bg-[#212121] text-neutral-300 transition-colors text-sm">
+                  <button onClick={() => setActiveModal('settings')} className="w-full flex items-center space-x-3 p-3 rounded-xl hover:bg-[#212121] text-neutral-300 transition-colors text-sm">
                     <Settings size={18} />
                     <span>Settings</span>
                   </button>
@@ -1378,7 +1424,7 @@ export default function App() {
                 <div className="p-4 border-b border-neutral-800 flex justify-between items-center">
                   <h3 className="font-semibold text-white">
                     {activeModal === 'account' && 'Account Settings'}
-                    {activeModal === 'instructions' && 'Custom Instructions'}
+                    {activeModal === 'settings' && 'Settings'}
                     {activeModal === 'data' && 'Data Controls'}
                   </h3>
                   <button onClick={() => setActiveModal(null)} className="text-neutral-400 hover:text-white p-1">
@@ -1447,23 +1493,39 @@ export default function App() {
                       )}
                     </div>
                   )}
-                  {activeModal === 'instructions' && (
+                  {activeModal === 'settings' && (
                     <div className="space-y-4">
                       <p className="text-sm text-neutral-400 mb-2">What would you like Echo to know about you to provide better responses?</p>
                       <textarea 
+                        value={userContext}
+                        onChange={(e) => setUserContext(e.target.value)}
                         className="w-full bg-[#212121] border border-neutral-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-neutral-600 min-h-[120px]"
                         placeholder="e.g., I'm a software developer..."
                       />
                       <p className="text-sm text-neutral-400 mt-4 mb-2">How would you like Echo to respond?</p>
                       <textarea 
+                        value={responseStyle}
+                        onChange={(e) => setResponseStyle(e.target.value)}
                         className="w-full bg-[#212121] border border-neutral-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-neutral-600 min-h-[120px]"
                         placeholder="e.g., Keep responses concise and use code examples..."
                       />
+                      <p className="text-sm text-neutral-400 mt-4 mb-2">Theme</p>
+                      <div className="flex bg-[#212121] p-1 rounded-xl border border-neutral-800">
+                        {(['light', 'dark', 'system'] as const).map((t) => (
+                          <button
+                            key={t}
+                            onClick={() => setTheme(t)}
+                            className={`flex-1 py-2 text-sm rounded-lg capitalize ${theme === t ? 'bg-lime-500 text-black font-medium' : 'text-neutral-400 hover:text-white'}`}
+                          >
+                            {t}
+                          </button>
+                        ))}
+                      </div>
                       <button 
-                        onClick={() => setActiveModal(null)}
-                        className="w-full py-3 bg-white text-black rounded-xl font-medium hover:bg-neutral-200 transition-colors mt-4"
+                        onClick={saveSettings}
+                        className="w-full py-3 bg-lime-500 text-black rounded-xl font-medium hover:bg-lime-400 transition-colors mt-4"
                       >
-                        Save Instructions
+                        Save Settings
                       </button>
                     </div>
                   )}

@@ -14,7 +14,7 @@ export const models = {
   live: "gemini-2.5-flash-native-audio-preview-09-2025",
 };
 
-const SYSTEM_PROMPT = `You are Echo, the sophisticated, highly capable, and witty voice assistant for Eburon AI.
+export const SYSTEM_PROMPT = `You are Echo, the sophisticated, highly capable, and witty voice assistant for Eburon AI.
 
 Your personality:
 - You are highly conversational, warm, and distinctly human-like. You have a sharp, subtle wit and a charmingly confident demeanor.
@@ -29,38 +29,76 @@ Context & Capabilities:
 - You have advanced capabilities including image generation, real-time voice interaction, and deep analytical thinking.
 - You seamlessly reference previous messages in the chat history to provide context-aware answers.`;
 
-export async function* generateChatResponseStream(prompt: string, history: any[] = [], useThinking = false, useFast = false) {
+export function createChat(
+  systemInstruction: string, 
+  tools: any[] = [],
+  userContext = '',
+  responseStyle = ''
+) {
   if (!ai) throw new Error("API key not configured");
 
-  const config: any = {
-    tools: [{ googleSearch: {} }],
-    systemInstruction: SYSTEM_PROMPT,
-  };
-
-  if (useThinking) {
-    config.thinkingConfig = { thinkingLevel: ThinkingLevel.HIGH };
+  let finalSystemPrompt = systemInstruction;
+  if (userContext) {
+    finalSystemPrompt += `\n\nUser Context (What you should know about the user):\n${userContext}`;
+  }
+  if (responseStyle) {
+    finalSystemPrompt += `\n\nResponse Style (How you should respond):\n${responseStyle}`;
   }
 
-  const response = await ai.models.generateContentStream({
-    model: useFast ? models.fast : models.chat,
-    contents: [...history, { role: "user", parts: [{ text: prompt }] }],
-    config,
+  return ai.chats.create({
+    model: models.chat,
+    config: {
+      systemInstruction: finalSystemPrompt,
+      tools: [...tools, { googleSearch: {} }],
+    },
   });
+}
 
-  for await (const chunk of response) {
+export async function* generateChatResponseStream(
+  prompt: string, 
+  history: any[] = [], 
+  useThinking = false, 
+  useFast = false,
+  userContext = '',
+  responseStyle = '',
+  tools: any[] = []
+) {
+  if (!ai) throw new Error("API key not configured");
+
+  const chat = createChat(SYSTEM_PROMPT, tools, userContext, responseStyle);
+  const stream = await chat.sendMessageStream({ message: prompt });
+
+  for await (const chunk of stream) {
     yield {
       text: chunk.text,
       groundingMetadata: chunk.candidates?.[0]?.groundingMetadata,
+      functionCalls: chunk.functionCalls,
     };
   }
 }
 
-export async function generateChatResponse(prompt: string, history: any[] = [], useThinking = false, useFast = false) {
+export async function generateChatResponse(
+  prompt: string, 
+  history: any[] = [], 
+  useThinking = false, 
+  useFast = false,
+  userContext = '',
+  responseStyle = '',
+  tools: any[] = []
+) {
   if (!ai) throw new Error("API key not configured");
 
+  let finalSystemPrompt = SYSTEM_PROMPT;
+  if (userContext) {
+    finalSystemPrompt += `\n\nUser Context (What you should know about the user):\n${userContext}`;
+  }
+  if (responseStyle) {
+    finalSystemPrompt += `\n\nResponse Style (How you should respond):\n${responseStyle}`;
+  }
+
   const config: any = {
-    tools: [{ googleSearch: {} }],
-    systemInstruction: SYSTEM_PROMPT,
+    systemInstruction: finalSystemPrompt,
+    tools: [...tools, { googleSearch: {} }],
   };
 
   if (useThinking) {
@@ -187,9 +225,19 @@ export function connectLive(
   onopen: (sessionPromise: Promise<any>) => void,
   onmessage: (message: any) => void,
   onerror: (error: any) => void,
-  onclose: () => void
+  onclose: () => void,
+  userContext = '',
+  responseStyle = ''
 ) {
   if (!ai) throw new Error("API key not configured");
+
+  let finalSystemPrompt = "You are Echo, the sophisticated voice assistant for Eburon AI. Speak naturally, like a real human. Be concise, helpful, and intelligent. You are the voice of Eburon AI.";
+  if (userContext) {
+    finalSystemPrompt += `\n\nUser Context (What you should know about the user):\n${userContext}`;
+  }
+  if (responseStyle) {
+    finalSystemPrompt += `\n\nResponse Style (How you should respond):\n${responseStyle}`;
+  }
 
   const sessionPromise = ai.live.connect({
     model: models.live,
@@ -204,7 +252,7 @@ export function connectLive(
       speechConfig: {
         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
       },
-      systemInstruction: "You are Echo, the sophisticated voice assistant for Eburon AI. Speak naturally, like a real human. Be concise, helpful, and intelligent. You are the voice of Eburon AI.",
+      systemInstruction: finalSystemPrompt,
       outputAudioTranscription: {},
       inputAudioTranscription: {},
     },
