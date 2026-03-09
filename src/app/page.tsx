@@ -29,7 +29,8 @@ import {
   PhoneOff,
   Phone,
   PenTool,
-  Code
+  Code,
+  Trash2
 } from 'lucide-react';
 import { 
   generateChatResponse, 
@@ -146,11 +147,14 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [liveTranscription, setLiveTranscription] = useState('');
   const [attachment, setAttachment] = useState<{ url: string, type: string } | null>(null);
+  const [showImageSettings, setShowImageSettings] = useState(false);
   
   // Image options
   const [imageSize, setImageSize] = useState<'1K' | '2K' | '4K'>('1K');
   const [aspectRatio, setAspectRatio] = useState('1:1');
   const [user, setUser] = useState<SupabaseUser | null>(null);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [chatHistory, setChatHistory] = useState<any[]>([]);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authLoading, setAuthLoading] = useState(false);
@@ -222,8 +226,26 @@ export default function App() {
 
   const clearChat = () => {
     setMessages([]);
+    setCurrentChatId(null);
     setView('home');
     setIsHeaderMenuOpen(false);
+  };
+
+  const deleteChat = async (e: React.MouseEvent, chatId: string) => {
+    e.stopPropagation();
+    if (!user) return;
+    
+    const { error } = await supabase
+      .from('chats')
+      .delete()
+      .eq('id', chatId);
+    
+    if (!error) {
+      if (currentChatId === chatId) {
+        clearChat();
+      }
+      fetchChatHistory();
+    }
   };
 
   const startLiveSession = async () => {
@@ -382,9 +404,84 @@ export default function App() {
     e.target.style.height = `${e.target.scrollHeight}px`;
   };
 
+  useEffect(() => {
+    if (user) {
+      fetchChatHistory();
+    } else {
+      setChatHistory([]);
+      setCurrentChatId(null);
+    }
+  }, [user]);
+
+  const fetchChatHistory = async () => {
+    if (!user) return;
+    const { data, error } = await supabase
+      .from('chats')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false });
+    
+    if (!error && data) {
+      setChatHistory(data);
+    }
+  };
+
+  const loadChat = async (chatId: string) => {
+    setIsLoading(true);
+    setIsSidebarOpen(false);
+    setCurrentChatId(chatId);
+    
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('chat_id', chatId)
+      .order('created_at', { ascending: true });
+    
+    if (!error && data) {
+      const formattedMessages: Message[] = data.map(m => ({
+        role: m.role,
+        text: m.text,
+        image: m.image_url,
+        isImageGen: m.is_image_gen,
+        original_prompt: m.original_prompt
+      }));
+      setMessages(formattedMessages);
+      setView('chat');
+    }
+    setIsLoading(false);
+  };
+
+  const createNewChat = (initialText?: string) => {
+    setMessages([]);
+    setCurrentChatId(null);
+    setView('home');
+    setIsSidebarOpen(false);
+  };
+
   const saveMessageToDb = async (msg: Message) => {
     if (!user) return;
     try {
+      let chatId = currentChatId;
+      
+      if (!chatId) {
+        // Create new chat
+        const title = msg.text.slice(0, 30) + (msg.text.length > 30 ? '...' : '');
+        const { data: newChat, error: chatError } = await supabase
+          .from('chats')
+          .insert({
+            user_id: user.id,
+            title: title,
+            created_at: new Date().toISOString()
+          })
+          .select()
+          .single();
+        
+        if (chatError || !newChat) throw chatError;
+        chatId = newChat.id;
+        setCurrentChatId(chatId);
+        fetchChatHistory();
+      }
+
       let imageUrl = msg.image;
       if (msg.image && msg.image.startsWith('data:image')) {
         // Upload to storage
@@ -406,6 +503,7 @@ export default function App() {
       }
 
       await supabase.from('messages').insert({
+        chat_id: chatId,
         user_id: user.id,
         role: msg.role,
         text: msg.text,
@@ -548,11 +646,15 @@ export default function App() {
       const base64 = (event.target?.result as string).split(',')[1];
       const mimeType = file.type;
       
-      setMessages(prev => [...prev, { role: 'user', text: `Analyzed ${file.name}`, image: event.target?.result as string }]);
+      const userMsg: Message = { role: 'user', text: `Analyzed ${file.name}`, image: event.target?.result as string };
+      setMessages(prev => [...prev, userMsg]);
+      saveMessageToDb(userMsg);
       setIsLoading(true);
       try {
         const response = await analyzeImage("What is in this image?", base64, mimeType);
-        setMessages(prev => [...prev, { role: 'model', text: response || '' }]);
+        const modelMsg: Message = { role: 'model', text: response || '' };
+        setMessages(prev => [...prev, modelMsg]);
+        saveMessageToDb(modelMsg);
       } catch (error) {
         console.error(error);
       } finally {
@@ -803,50 +905,71 @@ export default function App() {
                       </button>
                     </motion.div>
                   )}
-                  {input.toLowerCase().includes('image') && !attachment && (
+                  {showImageSettings && (
                     <motion.div 
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, y: 10 }}
-                      className="absolute -top-12 left-0 right-0 flex justify-center space-x-2 px-4"
+                      className="absolute -top-14 left-0 right-0 flex justify-center space-x-2 px-4"
                     >
-                      <select 
-                        value={imageSize} 
-                        onChange={(e) => setImageSize(e.target.value as any)}
-                        className="bg-[#1a1a1a] text-[11px] font-medium text-white rounded-full px-3 py-1.5 border border-neutral-800 focus:outline-none shadow-lg"
-                      >
-                        <option value="1K">1K (Standard)</option>
-                        <option value="2K">2K (HD)</option>
-                        <option value="4K">4K (Ultra)</option>
-                      </select>
-                      <select 
-                        value={aspectRatio} 
-                        onChange={(e) => setAspectRatio(e.target.value)}
-                        className="bg-[#1a1a1a] text-[11px] font-medium text-white rounded-full px-3 py-1.5 border border-neutral-800 focus:outline-none shadow-lg"
-                      >
-                        <option value="1:1">1:1 Square</option>
-                        <option value="16:9">16:9 Wide</option>
-                        <option value="9:16">9:16 Tall</option>
-                        <option value="4:3">4:3 Classic</option>
-                        <option value="3:4">3:4 Portrait</option>
-                      </select>
+                      <div className="flex items-center space-x-2 bg-[#1a1a1a] p-1 rounded-full border border-neutral-800 shadow-2xl">
+                        <div className="flex items-center space-x-1 px-2 border-r border-neutral-800">
+                          <ImageIcon size={14} className="text-purple-400" />
+                          <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-tight">Image Gen</span>
+                        </div>
+                        <select 
+                          value={imageSize} 
+                          onChange={(e) => setImageSize(e.target.value as any)}
+                          className="bg-transparent text-[11px] font-medium text-white rounded-full px-2 py-1 focus:outline-none cursor-pointer hover:bg-white/5"
+                        >
+                          <option value="1K">1K</option>
+                          <option value="2K">2K</option>
+                          <option value="4K">4K</option>
+                        </select>
+                        <select 
+                          value={aspectRatio} 
+                          onChange={(e) => setAspectRatio(e.target.value)}
+                          className="bg-transparent text-[11px] font-medium text-white rounded-full px-2 py-1 focus:outline-none cursor-pointer hover:bg-white/5"
+                        >
+                          <option value="1:1">1:1</option>
+                          <option value="16:9">16:9</option>
+                          <option value="9:16">9:16</option>
+                          <option value="4:3">4:3</option>
+                          <option value="3:4">3:4</option>
+                        </select>
+                        <button 
+                          onClick={() => setShowImageSettings(false)}
+                          className="p-1 text-neutral-500 hover:text-white"
+                        >
+                          <X size={14} />
+                        </button>
+                      </div>
                     </motion.div>
                   )}
                 </AnimatePresence>
-                <textarea 
-                  ref={textareaRef}
-                  value={input}
-                  onChange={handleInput}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      sendMessage();
-                    }
-                  }}
-                  rows={1} 
-                  className="flex-1 bg-transparent text-white placeholder-neutral-400 text-[15px] focus:outline-none pl-3 py-1.5 hide-scrollbar max-h-24" 
-                  placeholder="Ask Echo AI"
-                />
+                <div className="flex items-center w-full">
+                  <button 
+                    onClick={() => setShowImageSettings(!showImageSettings)}
+                    className={`p-1.5 ml-1 rounded-lg transition-colors ${showImageSettings ? 'text-purple-400 bg-purple-400/10' : 'text-neutral-500 hover:text-white'}`}
+                    title="Image Generation Settings"
+                  >
+                    <PenTool size={18} />
+                  </button>
+                  <textarea 
+                    ref={textareaRef}
+                    value={input}
+                    onChange={handleInput}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        sendMessage();
+                      }
+                    }}
+                    rows={1} 
+                    className="flex-1 bg-transparent text-white placeholder-neutral-400 text-[15px] focus:outline-none pl-2 py-1.5 hide-scrollbar max-h-24" 
+                    placeholder={showImageSettings ? "Describe the image you want to create..." : "Ask Echo AI"}
+                  />
+                </div>
                 
                 {input.trim().length === 0 ? (
                   <>
@@ -1032,15 +1155,63 @@ export default function App() {
                 className="absolute top-0 left-0 w-[75%] h-full bg-[#111] z-50 flex flex-col"
               >
                 <div className="p-6 border-b border-neutral-800 flex justify-between items-center">
-                  <span className="font-semibold text-lg">Echo AI Settings</span>
+                  <span className="font-semibold text-lg">Echo AI</span>
                   <button onClick={() => setIsSidebarOpen(false)} className="text-neutral-400 hover:text-white">
                     <X size={24} />
                   </button>
                 </div>
-                <div className="flex-1 p-4 space-y-4">
-                  <button onClick={() => setActiveModal('account')} className="w-full text-left p-3 rounded-xl hover:bg-[#212121] text-neutral-200 transition-colors">Account</button>
-                  <button onClick={() => setActiveModal('instructions')} className="w-full text-left p-3 rounded-xl hover:bg-[#212121] text-neutral-200 transition-colors">Custom Instructions</button>
-                  <button onClick={() => setActiveModal('data')} className="w-full text-left p-3 rounded-xl hover:bg-[#212121] text-neutral-200 transition-colors">Data Controls</button>
+                
+                <div className="p-4 border-b border-neutral-800">
+                  <button 
+                    onClick={() => createNewChat()}
+                    className="w-full flex items-center justify-center space-x-2 bg-white text-black p-3 rounded-xl font-medium hover:bg-neutral-200 transition-colors"
+                  >
+                    <Plus size={18} />
+                    <span>New Chat</span>
+                  </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-4 space-y-2 hide-scrollbar">
+                  <div className="text-xs font-semibold text-neutral-500 uppercase tracking-wider mb-2 px-2">History</div>
+                  {chatHistory.length === 0 ? (
+                    <div className="text-neutral-500 text-sm px-2 py-4 italic">No chat history yet</div>
+                  ) : (
+                    chatHistory.map((chat) => (
+                      <button 
+                        key={chat.id}
+                        onClick={() => loadChat(chat.id)}
+                        className={`w-full text-left p-3 rounded-xl transition-colors group flex items-center space-x-3 ${currentChatId === chat.id ? 'bg-[#212121] text-white' : 'text-neutral-400 hover:bg-[#212121] hover:text-white'}`}
+                      >
+                        <div className="flex-1 truncate text-sm font-medium">{chat.title}</div>
+                        <div className="flex items-center space-x-2">
+                          <div className="text-[10px] text-neutral-600 group-hover:text-neutral-400">
+                            {new Date(chat.created_at).toLocaleDateString()}
+                          </div>
+                          <button 
+                            onClick={(e) => deleteChat(e, chat.id)}
+                            className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 transition-all"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
+
+                <div className="p-4 border-t border-neutral-800 space-y-2">
+                  <button onClick={() => setActiveModal('account')} className="w-full flex items-center space-x-3 p-3 rounded-xl hover:bg-[#212121] text-neutral-300 transition-colors text-sm">
+                    <User size={18} />
+                    <span>Account</span>
+                  </button>
+                  <button onClick={() => setActiveModal('instructions')} className="w-full flex items-center space-x-3 p-3 rounded-xl hover:bg-[#212121] text-neutral-300 transition-colors text-sm">
+                    <Settings size={18} />
+                    <span>Settings</span>
+                  </button>
+                  <button onClick={handleSignOut} className="w-full flex items-center space-x-3 p-3 rounded-xl hover:bg-[#212121] text-red-400 transition-colors text-sm">
+                    <PhoneOff size={18} />
+                    <span>Sign Out</span>
+                  </button>
                 </div>
               </motion.div>
             </>
