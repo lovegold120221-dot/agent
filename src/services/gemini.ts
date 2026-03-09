@@ -7,6 +7,7 @@ export const models = {
   chat: "gemini-3.1-pro-preview",
   fast: "gemini-3.1-flash-lite-preview",
   image: "gemini-3.1-flash-image-preview",
+  imageBasic: "gemini-2.5-flash-image",
   imagePro: "gemini-3-pro-image-preview",
   audio: "gemini-3-flash-preview",
   tts: "gemini-2.5-flash-preview-tts",
@@ -39,15 +40,23 @@ export async function generateChatResponse(prompt: string, history: any[] = [], 
 export async function generateImage(prompt: string, size: "1K" | "2K" | "4K" = "1K", aspectRatio: string = "1:1") {
   if (!ai) throw new Error("API key not configured");
 
-  const response = await ai.models.generateContent({
-    model: models.imagePro,
-    contents: [{ parts: [{ text: prompt }] }],
-    config: {
-      imageConfig: {
-        imageSize: size,
-        aspectRatio: aspectRatio as any,
-      },
+  const isBasic = size === "1K" && aspectRatio === "1:1";
+  const model = isBasic ? models.imageBasic : models.image;
+
+  const config: any = {
+    imageConfig: {
+      aspectRatio: aspectRatio as any,
     },
+  };
+
+  if (!isBasic) {
+    config.imageConfig.imageSize = size;
+  }
+
+  const response = await ai.models.generateContent({
+    model: model,
+    contents: [{ parts: [{ text: prompt }] }],
+    config,
   });
 
   const imagePart = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
@@ -114,7 +123,7 @@ export async function transcribeAudio(base64Data: string, mimeType: string) {
 
 export function connectLive(callbacks: {
   onopen?: () => void;
-  onmessage?: (message: any) => void;
+  onmessage: (message: any) => void;
   onerror?: (error: any) => void;
   onclose?: () => void;
 }) {
@@ -128,7 +137,9 @@ export function connectLive(callbacks: {
       speechConfig: {
         voiceConfig: { prebuiltVoiceConfig: { voiceName: "Zephyr" } },
       },
-      systemInstruction: "You are a helpful voice assistant named Echo.",
+      systemInstruction: "You are a helpful assistant named Echo.",
+      outputAudioTranscription: {},
+      inputAudioTranscription: {},
     },
   });
 }
