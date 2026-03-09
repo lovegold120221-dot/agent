@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import Markdown from 'react-markdown';
 import { 
   Menu, 
   MoreVertical, 
@@ -51,18 +52,86 @@ interface Message {
   image?: string;
   audio?: string;
   isImageGen?: boolean;
+  groundingMetadata?: any;
 }
 
 type ViewState = 'home' | 'chat';
+
+const CodeBlock = ({ inline, className, children, ...props }: any) => {
+  const match = /language-(\w+)/.exec(className || '');
+  const language = match ? match[1] : '';
+  const isHtml = language === 'html' || language === 'xml';
+  const codeString = String(children).replace(/\n$/, '');
+  const [copied, setCopied] = useState(false);
+  const [showPreview, setShowPreview] = useState(isHtml);
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(codeString);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  if (inline) {
+    return <code className="bg-white/10 rounded px-1.5 py-0.5 text-sm font-mono text-blue-300" {...props}>{children}</code>;
+  }
+
+  return (
+    <div className="my-4 rounded-xl overflow-hidden border border-neutral-800 bg-[#121212]">
+      <div className="flex items-center justify-between px-4 py-2 bg-[#1e1e1e] border-b border-neutral-800">
+        <div className="flex items-center space-x-4">
+          <span className="text-xs font-medium text-neutral-400 uppercase">{language || 'code'}</span>
+          {isHtml && (
+            <div className="flex items-center space-x-2 bg-black/20 rounded-lg p-0.5">
+              <button 
+                onClick={() => setShowPreview(false)}
+                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${!showPreview ? 'bg-neutral-700 text-white' : 'text-neutral-400 hover:text-white'}`}
+              >
+                Code
+              </button>
+              <button 
+                onClick={() => setShowPreview(true)}
+                className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${showPreview ? 'bg-neutral-700 text-white' : 'text-neutral-400 hover:text-white'}`}
+              >
+                Preview
+              </button>
+            </div>
+          )}
+        </div>
+        <button 
+          onClick={handleCopy}
+          className="text-xs text-neutral-400 hover:text-white transition-colors flex items-center space-x-1"
+        >
+          {copied ? <span>Copied!</span> : <span>Copy</span>}
+        </button>
+      </div>
+      
+      {!showPreview ? (
+        <div className="p-4 overflow-x-auto text-sm font-mono text-neutral-300 whitespace-pre">
+          <code className={className} {...props}>{children}</code>
+        </div>
+      ) : (
+        <div className="bg-white w-full h-[400px]">
+          <iframe 
+            srcDoc={codeString} 
+            className="w-full h-full border-none"
+            sandbox="allow-scripts allow-modals allow-forms allow-popups"
+          />
+        </div>
+      )}
+    </div>
+  );
+};
 
 export default function App() {
   const [view, setView] = useState<ViewState>('home');
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isHeaderMenuOpen, setIsHeaderMenuOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isAppsOpen, setIsAppsOpen] = useState(false);
   const [isVoiceOpen, setIsVoiceOpen] = useState(false);
+  const [activeModal, setActiveModal] = useState<'account' | 'instructions' | 'data' | null>(null);
   const [isThinking, setIsThinking] = useState(false);
   const [isFastMode, setIsFastMode] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -97,6 +166,12 @@ export default function App() {
       stopLiveSession();
     };
   }, []);
+
+  const clearChat = () => {
+    setMessages([]);
+    setView('home');
+    setIsHeaderMenuOpen(false);
+  };
 
   const startLiveSession = async () => {
     try {
@@ -273,7 +348,11 @@ export default function App() {
           parts: [{ text: m.text }]
         }));
         const response = await generateChatResponse(textToSend, history, isThinking, isFastMode);
-        setMessages(prev => [...prev, { role: 'model', text: response.text || '' }]);
+        setMessages(prev => [...prev, { 
+          role: 'model', 
+          text: response.text || '',
+          groundingMetadata: response.groundingMetadata
+        }]);
       }
     } catch (error) {
       console.error(error);
@@ -395,9 +474,46 @@ export default function App() {
             >
               <Brain size={18} className={isThinking ? 'animate-pulse' : ''} />
             </button>
-            <button className="w-9 h-9 flex items-center justify-center text-neutral-300 hover:text-white rounded-full">
-              <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="6" r="1.5"></circle><circle cx="12" cy="12" r="1.5"></circle><circle cx="12" cy="18" r="1.5"></circle></svg>
-            </button>
+            <div className="relative">
+              <button 
+                onClick={() => setIsHeaderMenuOpen(!isHeaderMenuOpen)}
+                className="w-9 h-9 flex items-center justify-center text-neutral-300 hover:text-white rounded-full"
+              >
+                <svg width="20" height="20" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="6" r="1.5"></circle><circle cx="12" cy="12" r="1.5"></circle><circle cx="12" cy="18" r="1.5"></circle></svg>
+              </button>
+              
+              <AnimatePresence>
+                {isHeaderMenuOpen && (
+                  <>
+                    <div 
+                      className="fixed inset-0 z-30" 
+                      onClick={() => setIsHeaderMenuOpen(false)}
+                    />
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.95, y: -10 }}
+                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.95, y: -10 }}
+                      className="absolute right-0 mt-2 w-48 bg-[#1a1a1a] border border-neutral-800 rounded-2xl shadow-2xl z-40 overflow-hidden"
+                    >
+                      <button 
+                        onClick={clearChat}
+                        className="w-full px-4 py-3 text-left text-sm text-red-400 hover:bg-red-400/10 transition-colors flex items-center space-x-2"
+                      >
+                        <X size={16} />
+                        <span>Clear Chat</span>
+                      </button>
+                      <button 
+                        onClick={() => setIsHeaderMenuOpen(false)}
+                        className="w-full px-4 py-3 text-left text-sm text-neutral-300 hover:bg-white/5 transition-colors flex items-center space-x-2"
+                      >
+                        <Settings size={16} />
+                        <span>Settings</span>
+                      </button>
+                    </motion.div>
+                  </>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
         </header>
 
@@ -438,9 +554,49 @@ export default function App() {
                       {msg.role === 'model' ? (
                         <div className="flex items-start">
                           <div className="w-6 h-6 mr-3 shrink-0 rounded-md bg-white text-black flex items-center justify-center font-bold text-xs">E</div>
-                          <div className="flex-1">
-                            {msg.image && <img src={msg.image} alt="Generated" className="rounded-lg mb-2 max-w-full" referrerPolicy="no-referrer" />}
-                            <p className="whitespace-pre-wrap">{msg.text}</p>
+                          <div className="flex-1 overflow-hidden">
+                            {msg.image && (
+                              <div className="relative group mb-4">
+                                <img src={msg.image} alt="Generated" className="rounded-xl w-full object-cover shadow-lg border border-white/10" referrerPolicy="no-referrer" />
+                                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center">
+                                  <a 
+                                    href={msg.image} 
+                                    download="generated-image.png"
+                                    className="px-4 py-2 bg-white/20 hover:bg-white/30 backdrop-blur-md text-white rounded-full font-medium text-sm transition-colors flex items-center space-x-2"
+                                  >
+                                    <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"></path></svg>
+                                    <span>Download</span>
+                                  </a>
+                                </div>
+                              </div>
+                            )}
+                            <div className="markdown-body text-neutral-200">
+                              <Markdown components={{ code: CodeBlock }}>{msg.text}</Markdown>
+                            </div>
+                            {msg.groundingMetadata?.groundingChunks && msg.groundingMetadata.groundingChunks.length > 0 && (
+                              <div className="mt-4 pt-3 border-t border-white/10">
+                                <p className="text-xs text-neutral-400 mb-2 flex items-center">
+                                  <Search size={12} className="mr-1.5" /> Sources
+                                </p>
+                                <div className="flex flex-wrap gap-2">
+                                  {msg.groundingMetadata.groundingChunks.map((chunk: any, idx: number) => {
+                                    const web = chunk.web;
+                                    if (!web) return null;
+                                    return (
+                                      <a 
+                                        key={idx} 
+                                        href={web.uri} 
+                                        target="_blank" 
+                                        rel="noopener noreferrer" 
+                                        className="inline-flex items-center max-w-full bg-[#2a2a2a] hover:bg-[#333] rounded-lg px-2.5 py-1.5 transition-colors text-xs text-blue-300 border border-white/5"
+                                      >
+                                        <span className="truncate max-w-[200px]">{web.title}</span>
+                                      </a>
+                                    );
+                                  })}
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </div>
                       ) : (
@@ -472,7 +628,7 @@ export default function App() {
               onClick={() => setIsMenuOpen(true)}
               className="w-12 h-12 bg-[#212121] rounded-full flex items-center justify-center text-neutral-300 shrink-0 hover:bg-[#2f2f2f] transition-colors"
             >
-              <Plus size={24} />
+              <svg width="24" height="24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg>
             </button>
 
             <div className="flex-1 bg-[#212121] rounded-[24px] flex flex-col justify-end p-2 relative min-h-[52px]">
@@ -487,6 +643,37 @@ export default function App() {
               )}
 
               <div className="flex items-center w-full pr-1">
+                <AnimatePresence>
+                  {input.toLowerCase().includes('image') && (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 10 }}
+                      className="absolute -top-12 left-0 right-0 flex justify-center space-x-2 px-4"
+                    >
+                      <select 
+                        value={imageSize} 
+                        onChange={(e) => setImageSize(e.target.value as any)}
+                        className="bg-[#1a1a1a] text-[11px] font-medium text-white rounded-full px-3 py-1.5 border border-neutral-800 focus:outline-none shadow-lg"
+                      >
+                        <option value="1K">1K (Standard)</option>
+                        <option value="2K">2K (HD)</option>
+                        <option value="4K">4K (Ultra)</option>
+                      </select>
+                      <select 
+                        value={aspectRatio} 
+                        onChange={(e) => setAspectRatio(e.target.value)}
+                        className="bg-[#1a1a1a] text-[11px] font-medium text-white rounded-full px-3 py-1.5 border border-neutral-800 focus:outline-none shadow-lg"
+                      >
+                        <option value="1:1">1:1 Square</option>
+                        <option value="16:9">16:9 Wide</option>
+                        <option value="9:16">9:16 Tall</option>
+                        <option value="4:3">4:3 Classic</option>
+                        <option value="3:4">3:4 Portrait</option>
+                      </select>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
                 <textarea 
                   ref={textareaRef}
                   value={input}
@@ -550,37 +737,90 @@ export default function App() {
               className="absolute inset-0 bg-black z-50 flex flex-col justify-between overflow-hidden"
             >
               <div className="p-6 flex justify-between items-center text-neutral-400 relative z-10">
-                <span className="text-sm font-medium">{isLiveActive ? 'Listening...' : 'Connecting...'}</span>
+                <div className="flex items-center space-x-2">
+                  <div className={`w-2 h-2 rounded-full ${isSpeaking ? 'bg-blue-400 animate-pulse' : isLiveActive ? 'bg-emerald-400' : 'bg-neutral-600'}`} />
+                  <span className="text-sm font-medium">
+                    {isSpeaking ? 'Echo is speaking...' : isLiveActive ? 'Listening...' : 'Connecting...'}
+                  </span>
+                </div>
                 <button 
                   onClick={stopLiveSession}
-                  className="p-2 bg-[#212121] rounded-full text-white"
+                  className="p-2 bg-[#212121] rounded-full text-white hover:bg-[#2f2f2f] transition-colors"
                 >
                   <X size={20} />
                 </button>
               </div>
 
               <div className="flex-1 flex flex-col items-center justify-center relative z-10">
-                <div className="flex items-center space-x-2 h-24">
-                  {[...Array(5)].map((_, i) => (
-                    <div 
-                      key={i}
-                      className={`w-2 bg-white rounded-full ${isLiveActive ? 'wave-bar' : ''}`}
-                      style={{ height: '10px' }}
-                    />
-                  ))}
+                <div className="relative flex items-center justify-center">
+                  {/* Playback Progress Ring */}
+                  <AnimatePresence>
+                    {isSpeaking && (
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.8 }}
+                        className="absolute inset-[-40px] border-2 border-white/10 rounded-full"
+                      >
+                        <motion.div 
+                          animate={{ rotate: 360 }}
+                          transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
+                          className="absolute inset-0 border-t-2 border-white/40 rounded-full"
+                        />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+
+                  <div className="flex items-center space-x-2 h-24 relative z-10">
+                    {[...Array(5)].map((_, i) => (
+                      <motion.div 
+                        key={i}
+                        animate={isSpeaking ? { 
+                          height: [8, 48, 12, 64, 8],
+                          backgroundColor: ['#ffffff', '#60a5fa', '#ffffff']
+                        } : isLiveActive ? {
+                          height: [4, 24, 4],
+                          backgroundColor: '#ffffff'
+                        } : {
+                          height: 4,
+                          backgroundColor: '#404040'
+                        }}
+                        transition={{ 
+                          duration: isSpeaking ? 0.6 : 1, 
+                          repeat: Infinity, 
+                          delay: i * 0.1,
+                          ease: "easeInOut"
+                        }}
+                        className="w-2 rounded-full"
+                      />
+                    ))}
+                  </div>
                 </div>
                 
-                {liveTranscription && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="mt-12 px-10 text-center"
-                  >
-                    <p className="text-white/60 text-sm italic line-clamp-2">
-                      "{liveTranscription.trim()}"
-                    </p>
-                  </motion.div>
-                )}
+                <div className="mt-20 px-8 w-full max-w-xs text-center min-h-[80px] flex flex-col justify-center">
+                  <AnimatePresence mode="wait">
+                    {liveTranscription ? (
+                      <motion.p 
+                        key="transcription"
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -10 }}
+                        className="text-white/80 text-base font-light leading-relaxed italic"
+                      >
+                        "{liveTranscription.trim()}"
+                      </motion.p>
+                    ) : (
+                      <motion.p 
+                        key="placeholder"
+                        initial={{ opacity: 0 }}
+                        animate={{ opacity: 0.4 }}
+                        className="text-white text-sm tracking-[0.2em] uppercase font-light"
+                      >
+                        {isLiveActive ? 'I\'m listening' : 'Connecting...'}
+                      </motion.p>
+                    )}
+                  </AnimatePresence>
+                </div>
               </div>
 
               <div className="p-10 flex justify-center pb-20 relative z-10">
@@ -620,12 +860,105 @@ export default function App() {
                   </button>
                 </div>
                 <div className="flex-1 p-4 space-y-4">
-                  <button className="w-full text-left p-3 rounded-xl hover:bg-[#212121] text-neutral-200 transition-colors">Account</button>
-                  <button className="w-full text-left p-3 rounded-xl hover:bg-[#212121] text-neutral-200 transition-colors">Custom Instructions</button>
-                  <button className="w-full text-left p-3 rounded-xl hover:bg-[#212121] text-neutral-200 transition-colors">Data Controls</button>
+                  <button onClick={() => setActiveModal('account')} className="w-full text-left p-3 rounded-xl hover:bg-[#212121] text-neutral-200 transition-colors">Account</button>
+                  <button onClick={() => setActiveModal('instructions')} className="w-full text-left p-3 rounded-xl hover:bg-[#212121] text-neutral-200 transition-colors">Custom Instructions</button>
+                  <button onClick={() => setActiveModal('data')} className="w-full text-left p-3 rounded-xl hover:bg-[#212121] text-neutral-200 transition-colors">Data Controls</button>
                 </div>
               </motion.div>
             </>
+          )}
+        </AnimatePresence>
+
+        {/* Settings Modals */}
+        <AnimatePresence>
+          {activeModal && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black/80 z-[70] flex items-center justify-center p-4"
+            >
+              <motion.div 
+                initial={{ scale: 0.95, y: 20 }}
+                animate={{ scale: 1, y: 0 }}
+                exit={{ scale: 0.95, y: 20 }}
+                className="bg-[#1a1a1a] w-full max-w-md rounded-3xl border border-neutral-800 overflow-hidden flex flex-col max-h-[80vh]"
+              >
+                <div className="p-4 border-b border-neutral-800 flex justify-between items-center">
+                  <h3 className="font-semibold text-white">
+                    {activeModal === 'account' && 'Account Settings'}
+                    {activeModal === 'instructions' && 'Custom Instructions'}
+                    {activeModal === 'data' && 'Data Controls'}
+                  </h3>
+                  <button onClick={() => setActiveModal(null)} className="text-neutral-400 hover:text-white p-1">
+                    <X size={20} />
+                  </button>
+                </div>
+                <div className="p-6 overflow-y-auto">
+                  {activeModal === 'account' && (
+                    <div className="space-y-4 text-sm text-neutral-300">
+                      <div className="flex items-center space-x-4 mb-6">
+                        <div className="w-12 h-12 bg-blue-500 rounded-full flex items-center justify-center text-white text-lg font-semibold">
+                          U
+                        </div>
+                        <div>
+                          <p className="text-white font-medium">User Account</p>
+                          <p className="text-neutral-500">user@example.com</p>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <p className="font-medium text-white">Subscription</p>
+                        <p>Echo Plus (Active)</p>
+                      </div>
+                      <button className="mt-4 w-full py-2.5 bg-red-500/10 text-red-500 rounded-xl hover:bg-red-500/20 transition-colors font-medium">
+                        Sign Out
+                      </button>
+                    </div>
+                  )}
+                  {activeModal === 'instructions' && (
+                    <div className="space-y-4">
+                      <p className="text-sm text-neutral-400 mb-2">What would you like Echo to know about you to provide better responses?</p>
+                      <textarea 
+                        className="w-full bg-[#212121] border border-neutral-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-neutral-600 min-h-[120px]"
+                        placeholder="e.g., I'm a software developer..."
+                      />
+                      <p className="text-sm text-neutral-400 mt-4 mb-2">How would you like Echo to respond?</p>
+                      <textarea 
+                        className="w-full bg-[#212121] border border-neutral-800 rounded-xl p-3 text-sm text-white focus:outline-none focus:border-neutral-600 min-h-[120px]"
+                        placeholder="e.g., Keep responses concise and use code examples..."
+                      />
+                      <button 
+                        onClick={() => setActiveModal(null)}
+                        className="w-full py-3 bg-white text-black rounded-xl font-medium hover:bg-neutral-200 transition-colors mt-4"
+                      >
+                        Save Instructions
+                      </button>
+                    </div>
+                  )}
+                  {activeModal === 'data' && (
+                    <div className="space-y-6 text-sm text-neutral-300">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="text-white font-medium mb-1">Chat History & Training</p>
+                          <p className="text-xs text-neutral-500">Save new chats to your history and allow them to be used to improve our models.</p>
+                        </div>
+                        <div className="w-10 h-6 bg-emerald-500 rounded-full relative cursor-pointer shrink-0 ml-4">
+                          <div className="absolute right-1 top-1 w-4 h-4 bg-white rounded-full" />
+                        </div>
+                      </div>
+                      <div className="pt-4 border-t border-neutral-800">
+                        <button className="text-white font-medium hover:underline">Export Data</button>
+                        <p className="text-xs text-neutral-500 mt-1">Get a copy of your data sent to your email.</p>
+                      </div>
+                      <div className="pt-4 border-t border-neutral-800">
+                        <button className="text-red-500 font-medium hover:underline">Delete Account</button>
+                        <p className="text-xs text-neutral-500 mt-1">Permanently delete your account and all data.</p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            </motion.div>
           )}
         </AnimatePresence>
 
