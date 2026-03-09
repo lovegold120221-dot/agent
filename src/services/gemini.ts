@@ -66,6 +66,26 @@ export async function generateImage(prompt: string, size: "1K" | "2K" | "4K" = "
   return null;
 }
 
+export async function editImage(prompt: string, base64Data: string, mimeType: string) {
+  if (!ai) throw new Error("API key not configured");
+
+  const response = await ai.models.generateContent({
+    model: models.imageBasic,
+    contents: {
+      parts: [
+        { inlineData: { data: base64Data, mimeType } },
+        { text: prompt },
+      ],
+    },
+  });
+
+  const imagePart = response.candidates?.[0]?.content?.parts.find(p => p.inlineData);
+  if (imagePart?.inlineData) {
+    return `data:image/png;base64,${imagePart.inlineData.data}`;
+  }
+  return null;
+}
+
 export async function analyzeImage(prompt: string, base64Data: string, mimeType: string) {
   if (!ai) throw new Error("API key not configured");
 
@@ -121,17 +141,22 @@ export async function transcribeAudio(base64Data: string, mimeType: string) {
   return response.text;
 }
 
-export function connectLive(callbacks: {
-  onopen?: () => void;
-  onmessage: (message: any) => void;
-  onerror?: (error: any) => void;
-  onclose?: () => void;
-}) {
+export function connectLive(
+  onopen: (sessionPromise: Promise<any>) => void,
+  onmessage: (message: any) => void,
+  onerror: (error: any) => void,
+  onclose: () => void
+) {
   if (!ai) throw new Error("API key not configured");
 
-  return ai.live.connect({
+  const sessionPromise = ai.live.connect({
     model: models.live,
-    callbacks,
+    callbacks: {
+      onopen: () => onopen(sessionPromise),
+      onmessage,
+      onerror,
+      onclose
+    },
     config: {
       responseModalities: [Modality.AUDIO],
       speechConfig: {
@@ -142,4 +167,6 @@ export function connectLive(callbacks: {
       inputAudioTranscription: {},
     },
   });
+
+  return sessionPromise;
 }

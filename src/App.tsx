@@ -34,7 +34,8 @@ import {
   analyzeImage, 
   textToSpeech, 
   transcribeAudio,
-  connectLive 
+  connectLive,
+  editImage
 } from './services/gemini';
 
 declare global {
@@ -53,6 +54,7 @@ interface Message {
   audio?: string;
   isImageGen?: boolean;
   groundingMetadata?: any;
+  originalPrompt?: string;
 }
 
 type ViewState = 'home' | 'chat';
@@ -139,6 +141,7 @@ export default function App() {
   const [isLiveActive, setIsLiveActive] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [liveTranscription, setLiveTranscription] = useState('');
+  const [attachment, setAttachment] = useState<{ url: string, type: string } | null>(null);
   
   // Image options
   const [imageSize, setImageSize] = useState<'1K' | '2K' | '4K'>('1K');
@@ -184,12 +187,35 @@ export default function App() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       audioContextRef.current = new AudioContext({ sampleRate: 16000 });
       
-      const session = await connectLive({
-        onopen: () => {
+      const sessionPromise = connectLive(
+        (sessionPromise) => {
           console.log("Live session opened");
           setIsLiveActive(true);
+          
+          const source = audioContextRef.current!.createMediaStreamSource(stream);
+          const processor = audioContextRef.current!.createScriptProcessor(4096, 1, 1);
+          
+          processor.onaudioprocess = (e) => {
+            const inputData = e.inputBuffer.getChannelData(0);
+            const pcmData = new Int16Array(inputData.length);
+            for (let i = 0; i < inputData.length; i++) {
+              pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
+            }
+            const base64 = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
+            sessionPromise.then((session) => {
+              session.sendRealtimeInput({
+                media: { data: base64, mimeType: 'audio/pcm;rate=16000' }
+              });
+            });
+          };
+
+          source.connect(processor);
+          processor.connect(audioContextRef.current!.destination);
+          
+          streamRef.current = stream;
+          processorRef.current = processor;
         },
-        onmessage: (message) => {
+        (message) => {
           if (message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data) {
             const base64Audio = message.serverContent.modelTurn.parts[0].inlineData.data;
             const binaryString = atob(base64Audio);
@@ -216,35 +242,14 @@ export default function App() {
             setIsSpeaking(false);
           }
         },
-        onerror: (err) => console.error("Live error:", err),
-        onclose: () => {
+        (err) => console.error("Live error:", err),
+        () => {
           console.log("Live session closed");
           stopLiveSession();
         }
-      });
+      );
 
-      liveSessionRef.current = session;
-
-      const source = audioContextRef.current.createMediaStreamSource(stream);
-      const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1);
-      
-      processor.onaudioprocess = (e) => {
-        const inputData = e.inputBuffer.getChannelData(0);
-        const pcmData = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcmData[i] = Math.max(-1, Math.min(1, inputData[i])) * 0x7FFF;
-        }
-        const base64 = btoa(String.fromCharCode(...new Uint8Array(pcmData.buffer)));
-        session.sendRealtimeInput({
-          media: { data: base64, mimeType: 'audio/pcm;rate=16000' }
-        });
-      };
-
-      source.connect(processor);
-      processor.connect(audioContextRef.current.destination);
-      
-      streamRef.current = stream;
-      processorRef.current = processor;
+      liveSessionRef.current = await sessionPromise;
 
     } catch (err) {
       console.error("Failed to start live session:", err);
@@ -310,6 +315,17 @@ export default function App() {
     }
   };
 
+  const handleRetryImage = (prompt: string) => {
+    setInput(prompt);
+    sendMessage(prompt);
+  };
+
+  const handleEditImage = (prompt: string, imageUrl: string) => {
+    setAttachment({ url: imageUrl, type: 'image/png' });
+    setInput(`Edit this image: `);
+    if (textareaRef.current) textareaRef.current.focus();
+  };
+
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value);
     e.target.style.height = 'auto';
@@ -318,19 +334,30 @@ export default function App() {
 
   const sendMessage = async (overrideInput?: string) => {
     const textToSend = overrideInput || input;
-    if (!textToSend.trim()) return;
+    if (!textToSend.trim() && !attachment) return;
     
     if (view === 'home') setView('chat');
     
     const userMessage: Message = { role: 'user', text: textToSend };
+    if (attachment) {
+      userMessage.image = attachment.url;
+    }
     setMessages(prev => [...prev, userMessage]);
     setInput('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     
     setIsLoading(true);
     try {
-      // Simple heuristic for image generation
-      if (textToSend.toLowerCase().startsWith('create an image') || textToSend.toLowerCase().startsWith('generate an image')) {
+      if (attachment) {
+        const base64 = attachment.url.split(',')[1];
+        const imageUrl = await editImage(textToSend, base64, attachment.type);
+        if (imageUrl) {
+          setMessages(prev => [...prev, { role: 'model', text: 'Here is your edited image:', image: imageUrl, isImageGen: true, originalPrompt: textToSend }]);
+        } else {
+           setMessages(prev => [...prev, { role: 'model', text: 'Sorry, I could not edit the image.' }]);
+        }
+        setAttachment(null);
+      } else if (textToSend.toLowerCase().startsWith('create an image') || textToSend.toLowerCase().startsWith('generate an image') || textToSend.toLowerCase().startsWith('edit this image')) {
         const isBasic = imageSize === '1K' && aspectRatio === '1:1';
         if (!isBasic && window.aistudio) {
           const hasKey = await window.aistudio.hasSelectedApiKey();
@@ -340,7 +367,7 @@ export default function App() {
         }
         const imageUrl = await generateImage(textToSend, imageSize, aspectRatio);
         if (imageUrl) {
-          setMessages(prev => [...prev, { role: 'model', text: 'Here is your generated image:', image: imageUrl, isImageGen: true }]);
+          setMessages(prev => [...prev, { role: 'model', text: 'Here is your generated image:', image: imageUrl, isImageGen: true, originalPrompt: textToSend }]);
         }
       } else {
         const history = messages.map(m => ({
@@ -558,7 +585,25 @@ export default function App() {
                             {msg.image && (
                               <div className="relative group mb-4">
                                 <img src={msg.image} alt="Generated" className="rounded-xl w-full object-cover shadow-lg border border-white/10" referrerPolicy="no-referrer" />
-                                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center">
+                                <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity rounded-xl flex items-center justify-center gap-2">
+                                  {msg.isImageGen && (
+                                    <>
+                                      <button
+                                        onClick={() => msg.originalPrompt && handleRetryImage(msg.originalPrompt)}
+                                        className="p-2 bg-white/20 hover:bg-white/30 backdrop-blur-md text-white rounded-full transition-colors"
+                                        title="Retry"
+                                      >
+                                        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                                      </button>
+                                      <button
+                                        onClick={() => msg.originalPrompt && handleEditImage(msg.originalPrompt, msg.image!)}
+                                        className="p-2 bg-white/20 hover:bg-white/30 backdrop-blur-md text-white rounded-full transition-colors"
+                                        title="Edit"
+                                      >
+                                        <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
+                                      </button>
+                                    </>
+                                  )}
                                   <a 
                                     href={msg.image} 
                                     download="generated-image.png"
@@ -644,7 +689,23 @@ export default function App() {
 
               <div className="flex items-center w-full pr-1">
                 <AnimatePresence>
-                  {input.toLowerCase().includes('image') && (
+                  {attachment && (
+                    <motion.div 
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.8 }}
+                      className="absolute -top-16 left-4 bg-[#2a2a2a] p-1 rounded-xl border border-neutral-700 shadow-lg flex items-center space-x-2"
+                    >
+                      <img src={attachment.url} alt="Attachment" className="w-12 h-12 object-cover rounded-lg" />
+                      <button 
+                        onClick={() => setAttachment(null)}
+                        className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-0.5 hover:bg-red-600"
+                      >
+                        <X size={12} />
+                      </button>
+                    </motion.div>
+                  )}
+                  {input.toLowerCase().includes('image') && !attachment && (
                     <motion.div 
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
@@ -736,23 +797,41 @@ export default function App() {
               transition={{ type: 'spring', damping: 30, stiffness: 300 }}
               className="absolute inset-0 bg-black z-50 flex flex-col justify-between overflow-hidden"
             >
+              {/* Animated Background Gradients */}
+              <div className="absolute inset-0 overflow-hidden pointer-events-none">
+                <div className={`absolute top-1/4 left-1/4 w-96 h-96 bg-blue-500/10 rounded-full blur-[100px] transition-opacity duration-1000 ${isSpeaking ? 'opacity-100' : 'opacity-0'}`} />
+                <div className={`absolute bottom-1/4 right-1/4 w-96 h-96 bg-emerald-500/10 rounded-full blur-[100px] transition-opacity duration-1000 ${isLiveActive && !isSpeaking ? 'opacity-100' : 'opacity-0'}`} />
+              </div>
+
               <div className="p-6 flex justify-between items-center text-neutral-400 relative z-10">
-                <div className="flex items-center space-x-2">
-                  <div className={`w-2 h-2 rounded-full ${isSpeaking ? 'bg-blue-400 animate-pulse' : isLiveActive ? 'bg-emerald-400' : 'bg-neutral-600'}`} />
-                  <span className="text-sm font-medium">
-                    {isSpeaking ? 'Echo is speaking...' : isLiveActive ? 'Listening...' : 'Connecting...'}
+                <div className="flex items-center space-x-3 bg-white/5 px-4 py-2 rounded-full border border-white/10 backdrop-blur-md">
+                  <div className={`w-2.5 h-2.5 rounded-full ${!isLiveActive ? 'bg-yellow-400 animate-pulse' : isSpeaking ? 'bg-blue-400 animate-pulse shadow-[0_0_10px_rgba(96,165,250,0.8)]' : 'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.8)]'}`} />
+                  <span className="text-sm font-medium text-white">
+                    {!isLiveActive ? 'Connecting to Echo...' : isSpeaking ? 'Echo is speaking' : 'Echo is listening'}
                   </span>
                 </div>
                 <button 
                   onClick={stopLiveSession}
-                  className="p-2 bg-[#212121] rounded-full text-white hover:bg-[#2f2f2f] transition-colors"
+                  className="p-2.5 bg-white/10 rounded-full text-white hover:bg-white/20 transition-colors backdrop-blur-md"
                 >
                   <X size={20} />
                 </button>
               </div>
 
               <div className="flex-1 flex flex-col items-center justify-center relative z-10">
-                <div className="relative flex items-center justify-center">
+                <div className="relative flex items-center justify-center w-64 h-64">
+                  {/* Listening Radar Ping */}
+                  <AnimatePresence>
+                    {isLiveActive && !isSpeaking && (
+                      <motion.div
+                        initial={{ opacity: 0, scale: 0.5 }}
+                        animate={{ opacity: 0, scale: 2 }}
+                        transition={{ duration: 2, repeat: Infinity, ease: "easeOut" }}
+                        className="absolute inset-0 border-2 border-emerald-500/30 rounded-full"
+                      />
+                    )}
+                  </AnimatePresence>
+
                   {/* Playback Progress Ring */}
                   <AnimatePresence>
                     {isSpeaking && (
@@ -760,44 +839,45 @@ export default function App() {
                         initial={{ opacity: 0, scale: 0.8 }}
                         animate={{ opacity: 1, scale: 1 }}
                         exit={{ opacity: 0, scale: 0.8 }}
-                        className="absolute inset-[-40px] border-2 border-white/10 rounded-full"
+                        className="absolute inset-0 border-2 border-blue-500/20 rounded-full shadow-[0_0_30px_rgba(59,130,246,0.2)]"
                       >
                         <motion.div 
                           animate={{ rotate: 360 }}
-                          transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
-                          className="absolute inset-0 border-t-2 border-white/40 rounded-full"
+                          transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+                          className="absolute inset-[-2px] border-t-2 border-l-2 border-blue-400 rounded-full"
                         />
                       </motion.div>
                     )}
                   </AnimatePresence>
 
+                  {/* Central Waveform */}
                   <div className="flex items-center space-x-2 h-24 relative z-10">
                     {[...Array(5)].map((_, i) => (
                       <motion.div 
                         key={i}
-                        animate={isSpeaking ? { 
-                          height: [8, 48, 12, 64, 8],
-                          backgroundColor: ['#ffffff', '#60a5fa', '#ffffff']
-                        } : isLiveActive ? {
-                          height: [4, 24, 4],
-                          backgroundColor: '#ffffff'
+                        animate={!isLiveActive ? {
+                          height: 8,
+                          backgroundColor: '#52525b'
+                        } : isSpeaking ? { 
+                          height: [16, 64, 24, 80, 16],
+                          backgroundColor: ['#60a5fa', '#3b82f6', '#60a5fa']
                         } : {
-                          height: 4,
-                          backgroundColor: '#404040'
+                          height: [12, 32, 12],
+                          backgroundColor: '#34d399'
                         }}
                         transition={{ 
-                          duration: isSpeaking ? 0.6 : 1, 
+                          duration: isSpeaking ? 0.5 : 1.5, 
                           repeat: Infinity, 
                           delay: i * 0.1,
                           ease: "easeInOut"
                         }}
-                        className="w-2 rounded-full"
+                        className={`w-3 rounded-full ${isSpeaking ? 'shadow-[0_0_15px_rgba(59,130,246,0.6)]' : isLiveActive ? 'shadow-[0_0_10px_rgba(52,211,153,0.4)]' : ''}`}
                       />
                     ))}
                   </div>
                 </div>
                 
-                <div className="mt-20 px-8 w-full max-w-xs text-center min-h-[80px] flex flex-col justify-center">
+                <div className="mt-16 px-8 w-full max-w-md text-center min-h-[100px] flex flex-col justify-center">
                   <AnimatePresence mode="wait">
                     {liveTranscription ? (
                       <motion.p 
@@ -805,7 +885,7 @@ export default function App() {
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: -10 }}
-                        className="text-white/80 text-base font-light leading-relaxed italic"
+                        className="text-white text-xl font-medium leading-relaxed"
                       >
                         "{liveTranscription.trim()}"
                       </motion.p>
@@ -813,22 +893,22 @@ export default function App() {
                       <motion.p 
                         key="placeholder"
                         initial={{ opacity: 0 }}
-                        animate={{ opacity: 0.4 }}
-                        className="text-white text-sm tracking-[0.2em] uppercase font-light"
+                        animate={{ opacity: 0.5 }}
+                        className="text-white/60 text-sm tracking-[0.2em] uppercase font-medium"
                       >
-                        {isLiveActive ? 'I\'m listening' : 'Connecting...'}
+                        {isLiveActive ? 'Start speaking...' : 'Establishing connection...'}
                       </motion.p>
                     )}
                   </AnimatePresence>
                 </div>
               </div>
 
-              <div className="p-10 flex justify-center pb-20 relative z-10">
+              <div className="p-10 flex justify-center pb-16 relative z-10">
                 <button 
                   onClick={stopLiveSession}
-                  className="w-16 h-16 bg-red-500 rounded-full flex items-center justify-center text-white shadow-[0_0_20px_rgba(239,68,68,0.4)]"
+                  className="w-16 h-16 bg-red-500 hover:bg-red-600 rounded-full flex items-center justify-center text-white shadow-[0_0_30px_rgba(239,68,68,0.5)] transition-all hover:scale-105"
                 >
-                  <svg width="28" height="28" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16 8l2.586-2.586a2 2 0 012.828 0L24 8M6.586 17.414A2 2 0 008 18h8a2 2 0 001.414-.586l3.586-3.586a2 2 0 000-2.828l-3.586-3.586A2 2 0 0016 10H8a2 2 0 00-1.414.586l-3.586 3.586a2 2 0 000 2.828l3.586 3.586z"></path></svg>
+                  <PhoneOff size={28} />
                 </button>
               </div>
             </motion.div>
