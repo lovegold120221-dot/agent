@@ -1,5 +1,6 @@
 "use client";
 import React, { useState, useRef, useEffect } from 'react';
+import Image from 'next/image';
 import { motion, AnimatePresence } from 'motion/react';
 import Markdown from 'react-markdown';
 import { supabase } from '../lib/supabase';
@@ -30,10 +31,12 @@ import {
   Phone,
   PenTool,
   Code,
-  Trash2
+  Trash2,
+  RefreshCw
 } from 'lucide-react';
 import { 
   generateChatResponse, 
+  generateChatResponseStream,
   generateImage, 
   analyzeImage, 
   textToSpeech, 
@@ -148,6 +151,8 @@ export default function App() {
   const [liveTranscription, setLiveTranscription] = useState('');
   const [attachment, setAttachment] = useState<{ url: string, type: string } | null>(null);
   const [showImageSettings, setShowImageSettings] = useState(false);
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>('environment');
   
   // Image options
   const [imageSize, setImageSize] = useState<'1K' | '2K' | '4K'>('1K');
@@ -201,6 +206,8 @@ export default function App() {
     await supabase.auth.signOut();
   };
 
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -562,18 +569,70 @@ export default function App() {
           saveMessageToDb(modelMessage);
         }
       } else {
-        const history = messages.map(m => ({
-          role: m.role,
-          parts: [{ text: m.text }]
-        }));
-        const response = await generateChatResponse(textToSend, history, isThinking, isFastMode);
+        // Format history to ensure strictly alternating roles and valid text for memory
+        const history: any[] = [];
+        let expectedRole = 'user';
+        
+        for (const m of messages) {
+          if (!m.text || m.isImageGen) continue;
+          
+          if (m.role === expectedRole) {
+            history.push({
+              role: m.role,
+              parts: [{ text: m.text }]
+            });
+            expectedRole = expectedRole === 'user' ? 'model' : 'user';
+          } else if (history.length > 0) {
+            // If we get consecutive messages of the same role, append to the last one
+            const lastMsg = history[history.length - 1];
+            lastMsg.parts[0].text += '\n\n' + m.text;
+          }
+        }
+        
+        // Ensure history ends with 'model' so the new prompt can be 'user'
+        if (history.length > 0 && history[history.length - 1].role === 'user') {
+          history.pop();
+        }
+        
+        // Initialize an empty model message
         const modelMessage: Message = { 
           role: 'model', 
-          text: response.text || '',
-          groundingMetadata: response.groundingMetadata
+          text: '',
         };
+        
         setMessages(prev => [...prev, modelMessage]);
-        saveMessageToDb(modelMessage);
+        
+        let fullText = '';
+        let groundingMetadata = null;
+        
+        try {
+          const stream = generateChatResponseStream(textToSend, history, isThinking, isFastMode);
+          for await (const chunk of stream) {
+            fullText += chunk.text || '';
+            if (chunk.groundingMetadata) {
+              groundingMetadata = chunk.groundingMetadata;
+            }
+            
+            // Update the last message in the list
+            setMessages(prev => {
+              const newMessages = [...prev];
+              const lastMsg = newMessages[newMessages.length - 1];
+              if (lastMsg && lastMsg.role === 'model') {
+                lastMsg.text = fullText;
+                lastMsg.groundingMetadata = groundingMetadata;
+              }
+              return newMessages;
+            });
+          }
+          
+          // Save the final message to DB
+          const finalMessage = { ...modelMessage, text: fullText, groundingMetadata };
+          saveMessageToDb(finalMessage);
+        } catch (streamError) {
+          console.error('Streaming error:', streamError);
+          // Fallback to non-streaming if needed or handle error
+          throw streamError;
+        }
       }
     } catch (error) {
       console.error(error);
@@ -662,6 +721,71 @@ export default function App() {
       }
     };
     reader.readAsDataURL(file);
+  };
+
+  const startCamera = async () => {
+    setIsCameraOpen(true);
+    setIsMenuOpen(false);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: cameraFacing } 
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (err) {
+      console.error("Error accessing camera:", err);
+      setIsCameraOpen(false);
+    }
+  };
+
+  const stopCamera = () => {
+    if (videoRef.current && videoRef.current.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+    setIsCameraOpen(false);
+  };
+
+  const switchCamera = async () => {
+    const newFacing = cameraFacing === 'user' ? 'environment' : 'user';
+    setCameraFacing(newFacing);
+    
+    // Stop current stream
+    if (videoRef.current && videoRef.current.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+    }
+
+    // Start new stream
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { facingMode: newFacing } 
+      });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+    } catch (err) {
+      console.error("Error switching camera:", err);
+    }
+  };
+
+  const capturePhoto = () => {
+    if (videoRef.current && canvasRef.current) {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/png');
+        setAttachment({ url: dataUrl, type: 'image/png' });
+        if (view === 'home') setView('chat');
+        stopCamera();
+      }
+    }
   };
 
   const triggerAction = (prompt: string) => {
@@ -755,16 +879,23 @@ export default function App() {
                 exit={{ opacity: 0, scale: 1.05 }}
                 className="absolute inset-0 flex flex-col items-center justify-center pb-20 pt-20 z-10"
               >
-                <div className="mb-6">
-                  <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#e5e5e5" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
-                    <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
-                    <line x1="12" y1="22.08" x2="12" y2="12"></line>
-                  </svg>
+                <div className="mb-6 relative w-24 h-24 p-4 rounded-full border-2 border-white/10 bg-white/5 backdrop-blur-sm flex items-center justify-center shadow-[0_0_20px_rgba(255,255,255,0.05)]">
+                  <div className="relative w-full h-full">
+                    <Image 
+                      src="https://eburon.ai/icon-eburon.svg" 
+                      alt="Eburon AI Logo" 
+                      fill 
+                      className="object-contain"
+                      referrerPolicy="no-referrer"
+                    />
+                  </div>
                 </div>
-                <h1 className="text-[26px] font-semibold tracking-tight text-white mb-2">Echo</h1>
-                <p className="text-xs font-medium text-neutral-400 mb-6">By codexxx host</p>
-                <p className="text-base text-neutral-200">Eburon voice agent</p>
+                <h1 className="text-[28px] font-bold tracking-tight text-white mb-2">Eburon AI</h1>
+                <p className="text-sm font-medium text-neutral-400 mb-6">The Future of Intelligence</p>
+                <div className="flex flex-col items-center space-y-1">
+                  <p className="text-base text-neutral-200 font-medium"></p>
+                  <p className="text-xs text-neutral-500 italic"></p>
+                </div>
               </motion.main>
             ) : (
               <motion.main 
@@ -1155,7 +1286,18 @@ export default function App() {
                 className="absolute top-0 left-0 w-[75%] h-full bg-[#111] z-50 flex flex-col"
               >
                 <div className="p-6 border-b border-neutral-800 flex justify-between items-center">
-                  <span className="font-semibold text-lg">Echo AI</span>
+                  <div className="flex items-center space-x-3">
+                    <div className="relative w-8 h-8">
+                      <Image 
+                        src="https://eburon.ai/icon-eburon.svg" 
+                        alt="Echo AI Logo" 
+                        fill 
+                        className="object-contain"
+                        referrerPolicy="no-referrer"
+                      />
+                    </div>
+                    <span className="font-semibold text-lg">Eburon AI</span>
+                  </div>
                   <button onClick={() => setIsSidebarOpen(false)} className="text-neutral-400 hover:text-white">
                     <X size={24} />
                   </button>
@@ -1407,6 +1549,52 @@ export default function App() {
           )}
         </AnimatePresence>
 
+        {/* Camera Overlay */}
+        <AnimatePresence>
+          {isCameraOpen && (
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-black z-[100] flex flex-col"
+            >
+              <div className="relative flex-1 bg-black flex items-center justify-center overflow-hidden">
+                <video 
+                  ref={videoRef} 
+                  autoPlay 
+                  playsInline 
+                  className="w-full h-full object-cover"
+                />
+                <canvas ref={canvasRef} className="hidden" />
+                
+                <div className="absolute top-6 left-6 right-6 flex justify-between items-center z-10">
+                  <button 
+                    onClick={stopCamera}
+                    className="w-10 h-10 bg-black/40 backdrop-blur-md rounded-full flex items-center justify-center text-white"
+                  >
+                    <X size={20} />
+                  </button>
+                  <button 
+                    onClick={switchCamera}
+                    className="w-10 h-10 bg-black/40 backdrop-blur-md rounded-full flex items-center justify-center text-white"
+                  >
+                    <RefreshCw size={20} />
+                  </button>
+                </div>
+              </div>
+              
+              <div className="h-32 bg-black flex items-center justify-center px-10">
+                <button 
+                  onClick={capturePhoto}
+                  className="w-20 h-20 bg-white rounded-full flex items-center justify-center p-1"
+                >
+                  <div className="w-full h-full rounded-full border-4 border-black bg-white"></div>
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* Attachment Bottom Sheet */}
         <AnimatePresence>
           {isMenuOpen && (
@@ -1430,11 +1618,13 @@ export default function App() {
                 </div>
 
                 <div className="grid grid-cols-3 gap-3 mb-4">
-                  <label className="bg-[#2f2f2f] hover:bg-[#3a3a3a] rounded-[20px] py-4 flex flex-col items-center justify-center space-y-2 transition-colors cursor-pointer">
-                    <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFileUpload} />
+                  <button 
+                    onClick={startCamera}
+                    className="bg-[#2f2f2f] hover:bg-[#3a3a3a] rounded-[20px] py-4 flex flex-col items-center justify-center space-y-2 transition-colors"
+                  >
                     <Camera size={26} className="text-white" />
                     <span className="text-sm font-medium text-white">Camera</span>
-                  </label>
+                  </button>
                   <label className="bg-[#2f2f2f] hover:bg-[#3a3a3a] rounded-[20px] py-4 flex flex-col items-center justify-center space-y-2 transition-colors cursor-pointer">
                     <input type="file" accept="image/*" className="hidden" onChange={handleFileUpload} />
                     <ImageIcon size={26} className="text-white" />
