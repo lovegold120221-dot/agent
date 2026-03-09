@@ -156,6 +156,7 @@ export default function App() {
   const [showImageSettings, setShowImageSettings] = useState(false);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [cameraFacing, setCameraFacing] = useState<'user' | 'environment'>('environment');
+  const [voiceStatus, setVoiceStatus] = useState<string | null>(null);
   
   // Image options
   const [imageSize, setImageSize] = useState<'1K' | '2K' | '4K'>('1K');
@@ -671,6 +672,7 @@ export default function App() {
 
   const startRecording = async () => {
     try {
+      setVoiceStatus("Recording...");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
@@ -681,6 +683,7 @@ export default function App() {
       };
 
       mediaRecorder.onstop = async () => {
+        setVoiceStatus("Processing...");
         const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
         const reader = new FileReader();
         reader.onload = async () => {
@@ -694,15 +697,17 @@ export default function App() {
               // Voice Commands
               if (lowerTranscript.includes('create new chat') || lowerTranscript.includes('start new chat')) {
                 createNewChat();
+                setVoiceStatus(null);
                 return;
               }
               if (lowerTranscript.includes('clear history') || lowerTranscript.includes('delete history')) {
-                // Assuming we want to clear the current chat history
                 setMessages([]);
+                setVoiceStatus(null);
                 return;
               }
               if (lowerTranscript.includes('open settings') || lowerTranscript.includes('show settings')) {
                 setActiveModal('settings');
+                setVoiceStatus(null);
                 return;
               }
               
@@ -712,20 +717,29 @@ export default function App() {
                 textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
               }
               sendMessage(transcription);
+              setVoiceStatus(null);
+            } else {
+              setVoiceStatus("Could not transcribe audio.");
+              setTimeout(() => setVoiceStatus(null), 3000);
             }
           } catch (error) {
             console.error(error);
+            setVoiceStatus("Transcription failed.");
+            setTimeout(() => setVoiceStatus(null), 3000);
           } finally {
             setIsLoading(false);
           }
         };
         reader.readAsDataURL(audioBlob);
+        stream.getTracks().forEach(track => track.stop());
       };
 
       mediaRecorder.start();
       setIsRecording(true);
     } catch (err) {
       console.error("Error accessing microphone:", err);
+      setVoiceStatus("Microphone access denied.");
+      setTimeout(() => setVoiceStatus(null), 3000);
     }
   };
 
@@ -1159,6 +1173,11 @@ export default function App() {
                     >
                       {isRecording ? <Square size={20} /> : <Mic size={20} />}
                     </button>
+                    {voiceStatus && (
+                      <div className="absolute bottom-16 left-4 bg-neutral-800 text-white text-xs px-2 py-1 rounded">
+                        {voiceStatus}
+                      </div>
+                    )}
                     <button 
                       onClick={() => toggleVoiceMode(true)}
                       className="w-[34px] h-[34px] bg-white rounded-full flex items-center justify-center shrink-0 ml-1 hover:scale-105 transition-transform"
